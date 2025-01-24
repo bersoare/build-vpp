@@ -1,0 +1,41 @@
+FROM ubuntu:22.04 AS base
+
+ENV DEBIAN_FRONTEND noninteractive
+ENV TZ UTC
+ENV UNATTENDED y
+ENV TINI_VERSION v0.19.0
+
+FROM base AS builder
+
+ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-amd64 /tini
+ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-amd64.asc /tini.asc
+
+RUN  apt-get -y update && apt-get -y upgrade && apt-get install -y --no-install-recommends git make sudo git meson asciidoc pkgconf libkmod-dev libmnl-dev dirmngr gpg gpg-agent apt-transport-https ca-certificates && \
+ gpg --batch --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 595E85A6B1B4779EA4DAAEC70B588DFF0527A9B7 && \
+ gpg --batch --verify /tini.asc /tini
+
+ARG VPP_TAG
+ENV PKG_SUFFIX VPP_TAG
+
+RUN git clone --depth 1 -b ${VPP_TAG} https://github.com/FDio/vpp.git /root/vpp
+WORKDIR /root/vpp
+RUN make install-dep
+RUN make pkg-deb
+
+FROM base AS prod
+
+# copy packages
+COPY --from=builder /root/vpp/build-root/*.deb /root
+COPY --from=builder /tini /tini
+
+RUN chmod +x /tini && \
+  apt-get -y update && \
+  VPP_INSTALL_SKIP_SYSCTL=true apt install -f -y /root/libvppinfra_*.deb /root/vpp_*.deb /root/vpp-plugin-core*.deb /root/vpp-plugin-dpdk*.deb && \
+  rm -f /root/*.deb && \
+  apt clean
+
+COPY files/startup.conf /startup.conf
+
+USER nobody:nogroup
+
+ENTRYPOINT ["/tini", "-g", "--", "vpp", "-c", "/startup.conf"]
